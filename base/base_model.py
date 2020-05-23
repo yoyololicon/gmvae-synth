@@ -7,47 +7,7 @@ import torch.nn.functional as F
 
 # from model.loss import approx_q_y
 
-
-def log_gauss(q_z, mu, logdet_cov, precision):
-    z_dim = q_z.shape[-1]
-    q_z = q_z.unsqueeze(1)  # (batch, 1, z_dim)
-    dist = q_z - mu  # (batch, k, z_dim)
-    llh = -0.5 * (z_dim * np.log(2 * np.pi) + logdet_cov + torch.einsum('bkz,kzl,bkl->bk', dist, precision, dist))
-    return llh
-
-
-def approx_q_y(q_z, mu_lookup, logs_lookup, rho_lookup, k=10):
-    """
-    refer to eq.13 in the paper
-    """
-    q_z_shape = list(q_z.size())  # (b, z_dim)
-    mu_lookup_shape = [mu_lookup.num_embeddings, mu_lookup.embedding_dim]  # (k, z_dim)
-    logs_lookup_shape = [logs_lookup.num_embeddings, logs_lookup.embedding_dim]  # (k, 1)
-    rho_lookup_shape = [rho_lookup.num_embeddings, rho_lookup.embedding_dim]  # (k, 1)
-
-    if not mu_lookup_shape[0] == k:
-        raise ValueError("mu_lookup_shape (%s) does not match the given k (%s)" % (
-            mu_lookup_shape, k))
-
-    if not q_z_shape[1] == mu_lookup_shape[1]:
-        raise ValueError("q_z_shape (%s) does not match mu_lookup_shape (%s) in dimension of z" % (
-            q_z_shape, mu_lookup_shape))
-
-    mu, logs, rho = mu_lookup.weight, logs_lookup.weight.squeeze(), rho_lookup.squeeze().weight.tanh() * 0.99999
-    z_dim = q_z_shape[1]
-    logdet_cov = z_dim * logs + (z_dim - 1) * torch.log(1 - rho * rho)
-
-    # get inverse of AR(1) covariance matrix
-    # https://math.stackexchange.com/questions/975069/the-inverse-of-ar-structure-correlation-matrix-kac-murdock-szeg-%CC%88o-matrix
-    precision_matrix = (torch.diag_embed(-rho.unsqueeze(1).expand(-1, z_dim - 1), offset=-1)
-                        + torch.diag_embed(-rho.unsqueeze(1).expand(-1, z_dim - 1), offset=1)
-                        + torch.diag_embed(F.pad((1 + rho * rho).unsqueeze(1).expand(-1, z_dim - 2), (1, 1), value=1.))) \
-                       * (torch.exp(-logs) / (1 - rho * rho))[:, None, None]
-
-    log_q_y_logit = log_gauss(q_z, mu, logdet_cov, precision_matrix)
-    q_y = torch.nn.functional.softmax(log_q_y_logit, dim=1)
-    return log_q_y_logit, q_y
-
+from utils.util import approx_q_y, rho_L
 
 class BaseModel(nn.Module):
     """
@@ -116,11 +76,9 @@ class BaseGMVAE(BaseModel):
             return mu, logs, rho, mu
 
         z_dim = mu.shape[-1]
-        L = F.pad(rho.unsqueeze(1) ** torch.arange(z_dim), (z_dim - 1, 0)).unfold(1, z_dim, 1).flip(-1)
-        sigma = torch.exp(0.5 * logs)[:, None, None] * L * F.pad(
-            torch.sqrt(1 - rho * rho).unsqueeze(1).expand(-1, z_dim - 1), (1, 0), value=1.)
-        eps = torch.distributions.normal.Normal(0, 1).sample(sample_shape=mu.size())  # default require_grad=False
 
+        eps = torch.distributions.normal.Normal(0, 1).sample(sample_shape=mu.size())  # default require_grad=False
+        sigma = rho_L(logs, rho, z_dim)
         z = mu + weight * torch.einsum('bij,bj->bi', sigma, eps)  # reparameterization trick
 
         return mu, logs, rho, z
@@ -155,7 +113,7 @@ class BaseGMVAE(BaseModel):
         self.logvar_lookup.weight.data[torch.le(self.logvar_lookup.weight, self.logvar_bound)] = self.logvar_bound
 
     def _infer_class(self, q_z):
-        log_q_y_logit, q_y = approx_q_y(q_z, self.mu_lookup, self.logvar_lookup, k=self.n_class)
+        log_q_y_logit, q_y = approx_q_y(q_z, self.mu_lookup, self.logs_lookup, self.rho_lookup, k=self.n_class)
         val, ind = torch.max(q_y, dim=1)
         return log_q_y_logit, q_y, ind
 
