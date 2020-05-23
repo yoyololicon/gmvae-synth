@@ -37,17 +37,18 @@ class GMVAE_Trainer(BaseTrainer):
             label_idx = np.array([])
             for k, v in dict_cat_inst_ratio.items():
                 np.random.seed(111)
-                label_idx = np.hstack([label_idx, np.random.choice(dict_cat_inst_idx[k], int(v * n_label), replace=False)])
+                label_idx = np.hstack(
+                    [label_idx, np.random.choice(dict_cat_inst_idx[k], int(v * n_label), replace=False)])
             self.label_idx = label_idx
 
-    def _compute_loss(self, epoch, x, x_predict, q_mu, q_logvar, log_q_y_logit, q_y, y,
+    def _compute_loss(self, epoch, x, x_predict, q_mu, q_logs, q_rho, log_q_y_logit, q_y, y,
                       is_train=True, label_idx=None,
-                      pitch_input=None, pitch_mu=None, pitch_logvar=None, pitch_logit=None):
+                      pitch_input=None, pitch_mu=None, pitch_logs=None, pitch_rho=None, pitch_logit=None):
         logpx_z = -1 * self.loss['loss_recon'](epoch, x_predict, x)
         kld_y, h_y = self.loss['loss_class'](epoch, log_q_y_logit, q_y, self.model.n_class)
         neg_kld_y = -1 * kld_y
-        neg_kld_z = -1 * self.loss['loss_latent'](epoch, q_mu, q_logvar, q_y,
-                                                  self.model.mu_lookup, self.model.logvar_lookup)
+        neg_kld_z = -1 * self.loss['loss_latent'](epoch, q_mu, q_logs, q_rho, q_y,
+                                                  self.model.mu_lookup, self.model.logs_lookup, self.model.rho_lookup)
         # the instrument label loss will be zero if unsupervised
         label_loss = self.loss['loss_class_label'](epoch, log_q_y_logit, y, is_train=is_train, label_idx=label_idx)
 
@@ -61,9 +62,12 @@ class GMVAE_Trainer(BaseTrainer):
         if self.model.is_pitch_condition:
             assert pitch_input is not None
             assert pitch_mu is not None
-            assert pitch_logvar is not None
-            pitch_kl_loss = self.loss['loss_pitch_emb'](epoch, self.model.pitch_mu_lookup, self.model.pitch_logvar_lookup,
-                                                        pitch_mu, pitch_logvar, pitch_input)
+            assert pitch_logs is not None
+            assert pitch_rho is not None
+            pitch_kl_loss = self.loss['loss_pitch_emb'](epoch, self.model.pitch_mu_lookup,
+                                                        self.model.pitch_logs_lookup,
+                                                        self.model.pitch_rho_lookup,
+                                                        pitch_mu, pitch_logs, pitch_rho, pitch_input)
             pitch_kl_loss = torch.mean(pitch_kl_loss, dim=0)
         else:
             pitch_kl_loss = torch.zeros(1)
@@ -76,16 +80,14 @@ class GMVAE_Trainer(BaseTrainer):
             pitch_classify_loss = torch.zeros(1)
             pitch_classify_loss.require_grad = False
 
-
         total_loss = -1 * lower_bound + label_loss + pitch_kl_loss + pitch_classify_loss
 
-
-        return total_loss, lower_bound, logpx_z, neg_kld_y, neg_kld_z, h_y, label_loss,\
-            pitch_kl_loss, pitch_classify_loss
+        return total_loss, lower_bound, logpx_z, neg_kld_y, neg_kld_z, h_y, label_loss, \
+               pitch_kl_loss, pitch_classify_loss
 
     def _data_pipe(self, data, target, data_idx):
         if self.label_idx is not None:
-            batch_label_idx = np.nonzero(np.in1d(data_idx, self.label_idx))
+            batch_label_idx = np.nonzero(np.in1d(data_idx.cpu().detach().numpy(), self.label_idx))
         else:
             batch_label_idx = None
         y_ins, y_pitch_class, y_pitch, y_dyn = target[0], target[1], target[2], target[3]
@@ -119,13 +121,13 @@ class GMVAE_Trainer(BaseTrainer):
         for batch_idx, (data, target, idx) in enumerate(self.data_loader):
             pitch_input, dyn_input, data, target, batch_label_idx = self._data_pipe(data, target, idx)
 
-            x_predict, mu, logvar, z, log_q_y_logit, q_y, ind, pitch_mu, pitch_logvar, pitch_z, pitch_logit =\
+            x_predict, mu, logs, rho, z, log_q_y_logit, q_y, ind, pitch_mu, pitch_logs, pitch_rho, pitch_z, pitch_logit = \
                 self.model(data)
 
             loss, lower_bound, logpx_z, neg_kld_y, neg_kld_z, h_y, label_loss, pitch_kl_loss, pitch_classify_loss = \
-                self._compute_loss(epoch, data, x_predict, mu, logvar, log_q_y_logit, q_y, target,
+                self._compute_loss(epoch, data, x_predict, mu, logs, rho, log_q_y_logit, q_y, target,
                                    pitch_input=pitch_input, pitch_mu=pitch_mu,
-                                   pitch_logvar=pitch_logvar, pitch_logit=pitch_logit,
+                                   pitch_logs=pitch_logs, pitch_rho=pitch_rho, pitch_logit=pitch_logit,
                                    is_train=True, label_idx=batch_label_idx)
 
             self.optimizer.zero_grad()
@@ -221,14 +223,14 @@ class GMVAE_Trainer(BaseTrainer):
             for batch_idx, (data, target, idx) in enumerate(self.valid_data_loader):
                 pitch_input, dyn_input, data, target, batch_label_idx = self._data_pipe(data, target, idx)
 
-                x_predict, mu, logvar, z, log_q_y_logit, q_y, ind, pitch_mu, pitch_logvar, pitch_z, pitch_logit =\
+                x_predict, mu, logs, rho, z, log_q_y_logit, q_y, ind, pitch_mu, pitch_logs, pitch_rho, pitch_z, pitch_logit = \
                     self.model(data)
 
                 loss, lower_bound, logpx_z, neg_kld_y, neg_kld_z, h_y, label_loss, pitch_kl_loss, pitch_classify_loss = \
-                    self._compute_loss(epoch, data, x_predict, mu, logvar, log_q_y_logit, q_y, target,
+                    self._compute_loss(epoch, data, x_predict, mu, logs, rho, log_q_y_logit, q_y, target,
                                        pitch_input=pitch_input, pitch_mu=pitch_mu,
-                                       pitch_logvar=pitch_logvar, pitch_logit=pitch_logit,
-                                       is_train=False, label_idx=batch_label_idx)
+                                       pitch_logs=pitch_logs, pitch_rho=pitch_rho, pitch_logit=pitch_logit,
+                                       is_train=True, label_idx=batch_label_idx)
 
                 total_val_loss += loss.item()
                 total_val_lowerbound += lower_bound.item()

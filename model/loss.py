@@ -38,18 +38,6 @@ def pitch_ce_loss(x_predict, x, reduction="none"):
     return loss
 
 
-def kl_gauss(q_mu, q_logvar, mu=None, logvar=None):
-    """
-    KL divergence between two diagonal gaussians
-    """
-    if mu is None:
-        mu = torch.zeros_like(q_mu)
-    if logvar is None:
-        logvar = torch.zeros_like(q_logvar)
-
-    return -0.5 * (1 + q_logvar - logvar - (torch.pow(q_mu - mu, 2) + torch.exp(q_logvar)) / torch.exp(logvar))
-
-
 def kl_gauss_full(q_mu, q_cov, q_logdet_cov, mu=None, cov_inv=None, logdet_cov=None, overbatch=False):
     """
     KL divergence between two gaussians
@@ -65,7 +53,7 @@ def kl_gauss_full(q_mu, q_cov, q_logdet_cov, mu=None, cov_inv=None, logdet_cov=N
 
     if not overbatch:
         dist = mu - q_mu.unsqueeze(1)
-        return 0.5 * (torch.einsum('...ii->...', torch.einsum('klm,bmn->bkln'), cov_inv, q_cov) +
+        return 0.5 * (torch.einsum('...ii->...', torch.einsum('klm,bmn->bkln', cov_inv, q_cov)) +
                       torch.einsum('bki,kij,bkj->bk', dist, cov_inv, dist) +
                       logdet_cov - q_logdet_cov.unsqueeze(1) - z_dim)
     else:
@@ -126,8 +114,8 @@ def kl_latent(q_mu, q_logs, q_rho, q_y, mu_lookup, logs_lookup, rho_lookup):
 
 def kl_pitch_emb(pitch_mu_lookup, pitch_logs_lookup, pitch_rho_lookup, pitch_mu, pitch_logs, pitch_rho, y_pitch):
     mu = pitch_mu_lookup(y_pitch)
-    logs = pitch_logs_lookup(y_pitch)
-    rho = pitch_rho_lookup(y_pitch)
+    logs = pitch_logs_lookup(y_pitch).squeeze(1)
+    rho = pitch_rho_lookup(y_pitch).squeeze(1).tanh() * 0.99999
 
     z_dim = pitch_mu.shape[-1]
     pitch_cov = rho_cov(pitch_logs, pitch_rho, z_dim)
