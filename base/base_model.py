@@ -2,43 +2,49 @@ import logging
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+
+
 # from model.loss import approx_q_y
 
 
-def log_gauss(q_z, mu, logvar):
-    llh = - 0.5 * (torch.pow(q_z - mu, 2) / torch.exp(logvar) + logvar + np.log(2 * np.pi))
-    return torch.sum(llh, dim=1)
+def log_gauss(q_z, mu, logdet_cov, precision):
+    z_dim = q_z.shape[-1]
+    q_z = q_z.unsqueeze(1)  # (batch, 1, z_dim)
+    dist = q_z - mu  # (batch, k, z_dim)
+    llh = -0.5 * (z_dim * np.log(2 * np.pi) + logdet_cov + torch.einsum('bkz,kzl,bkl->bk', dist, precision, dist))
+    return llh
 
 
-def approx_q_y(q_z, mu_lookup, logvar_lookup, k=10):
+def approx_q_y(q_z, mu_lookup, logs_lookup, rho_lookup, k=10):
     """
     refer to eq.13 in the paper
     """
     q_z_shape = list(q_z.size())  # (b, z_dim)
     mu_lookup_shape = [mu_lookup.num_embeddings, mu_lookup.embedding_dim]  # (k, z_dim)
-    logvar_lookup_shape = [logvar_lookup.num_embeddings, logvar_lookup.embedding_dim]  # (k, z_dim)
+    logs_lookup_shape = [logs_lookup.num_embeddings, logs_lookup.embedding_dim]  # (k, 1)
+    rho_lookup_shape = [rho_lookup.num_embeddings, rho_lookup.embedding_dim]  # (k, 1)
 
     if not mu_lookup_shape[0] == k:
         raise ValueError("mu_lookup_shape (%s) does not match the given k (%s)" % (
             mu_lookup_shape, k))
-    if not logvar_lookup_shape[0] == k:
-        raise ValueError("logvar_lookup_shape (%s) does not match the given k (%s)" % (
-            logvar_lookup_shape, k))
+
     if not q_z_shape[1] == mu_lookup_shape[1]:
         raise ValueError("q_z_shape (%s) does not match mu_lookup_shape (%s) in dimension of z" % (
             q_z_shape, mu_lookup_shape))
-    if not q_z_shape[1] == logvar_lookup_shape[1]:
-        raise ValueError("q_z_shape (%s) does not match logvar_lookup_shape (%s) in dimension of z" % (
-            q_z_shape, logvar_lookup_shape))
 
-    # TODO: vectorization and don't use for loop
-    batch_size = q_z_shape[0]
-    log_q_y_logit = torch.zeros(batch_size, k).type(q_z.type())
+    mu, logs, rho = mu_lookup.weight, logs_lookup.weight.squeeze(), rho_lookup.squeeze().weight.tanh() * 0.99999
+    z_dim = q_z_shape[1]
+    logdet_cov = z_dim * logs + (z_dim - 1) * torch.log(1 - rho * rho)
 
-    for k_i in torch.arange(0, k):
-        mu_k, logvar_k = mu_lookup(k_i), logvar_lookup(k_i)
-        log_q_y_logit[:, k_i] = log_gauss(q_z, mu_k, logvar_k) + np.log(1 / k)
+    # get inverse of AR(1) covariance matrix
+    # https://math.stackexchange.com/questions/975069/the-inverse-of-ar-structure-correlation-matrix-kac-murdock-szeg-%CC%88o-matrix
+    precision_matrix = (torch.diag_embed(-rho.unsqueeze(1).expand(-1, z_dim - 1), offset=-1)
+                        + torch.diag_embed(-rho.unsqueeze(1).expand(-1, z_dim - 1), offset=1)
+                        + torch.diag_embed(F.pad((1 + rho * rho).unsqueeze(1).expand(-1, z_dim - 2), (1, 1), value=1.))) \
+                       * (torch.exp(-logs) / (1 - rho * rho))[:, None, None]
 
+    log_q_y_logit = log_gauss(q_z, mu, logdet_cov, precision_matrix)
     q_y = torch.nn.functional.softmax(log_q_y_logit, dim=1)
     return log_q_y_logit, q_y
 
@@ -47,6 +53,7 @@ class BaseModel(nn.Module):
     """
     Base class for all models
     """
+
     def __init__(self):
         super(BaseModel, self).__init__()
         self.logger = logging.getLogger(self.__class__.__name__)
@@ -86,7 +93,7 @@ class BaseGMVAE(BaseModel):
         self.n_class = n_class
         self.is_featExtract = is_featExtract
         self._build_mu_lookup()
-        self._build_logvar_lookup()
+        self._build_logs_rho_lookup()
 
     def _encode(self, x):
         """
@@ -100,20 +107,23 @@ class BaseGMVAE(BaseModel):
     def _decode(self, z):
         raise NotImplementedError
 
-    def _infer_latent(self, mu, logvar, weight=1):
+    def _infer_latent(self, mu, logs, rho, weight=1):
         if self.is_featExtract:
             """
             only when NOT is_train;
             return mu as the representative latent vector
             """
-            return mu, logvar, mu
+            return mu, logs, rho, mu
 
-        sigma = torch.sqrt(torch.exp(logvar))
-        eps = torch.distributions.normal.Normal(0, 1).sample(sample_shape=sigma.size())  # default require_grad=False
+        z_dim = mu.shape[-1]
+        L = F.pad(rho.unsqueeze(1) ** torch.arange(z_dim), (z_dim - 1, 0)).unfold(1, z_dim, 1).flip(-1)
+        sigma = torch.exp(0.5 * logs)[:, None, None] * L * F.pad(
+            torch.sqrt(1 - rho * rho).unsqueeze(1).expand(-1, z_dim - 1), (1, 0), value=1.)
+        eps = torch.distributions.normal.Normal(0, 1).sample(sample_shape=mu.size())  # default require_grad=False
 
-        z = mu + weight * sigma * eps  # reparameterization trick
+        z = mu + weight * torch.einsum('bij,bj->bi', sigma, eps)  # reparameterization trick
 
-        return mu, logvar, z
+        return mu, logs, rho, z
 
     def _build_mu_lookup(self):
         """
@@ -124,17 +134,21 @@ class BaseGMVAE(BaseModel):
         mu_lookup.weight.requires_grad = True
         self.mu_lookup = mu_lookup
 
-    def _build_logvar_lookup(self, pow_exp=0, logvar_trainable=False):
+    def _build_logs_rho_lookup(self, pow_exp=0, logvar_trainable=False):
         """
         follow Table 7 in the paper
         """
-        logvar_lookup = nn.Embedding(self.n_class, self.latent_dim)
+        logs_lookup = nn.Embedding(self.n_class, 1)
+        rho_lookup = nn.Embedding(self.n_class, 1)
         # init_sigma = np.exp(-1)
         init_sigma = np.exp(pow_exp)
         init_logvar = np.log(init_sigma ** 2)
-        nn.init.constant_(logvar_lookup.weight, init_logvar)
-        logvar_lookup.weight.requires_grad = logvar_trainable
-        self.logvar_lookup = logvar_lookup
+        nn.init.constant_(logs_lookup.weight, init_logvar)
+        nn.init.constant_(rho_lookup.weight, -5)
+        logs_lookup.weight.requires_grad = logvar_trainable
+        rho_lookup.weight.requires_grad = logvar_trainable
+        self.logs_lookup = logs_lookup
+        self.rho_lookup = rho_lookup
         # self.logvar_bound = np.log(np.exp(-1) ** 2)
 
     def _bound_logvar_lookup(self):
