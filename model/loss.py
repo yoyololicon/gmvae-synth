@@ -72,7 +72,7 @@ def kl_class(log_q_y_logit, q_y, k=10):
 
     h_y = torch.sum(q_y * torch.nn.functional.log_softmax(log_q_y_logit, dim=1), dim=1)
 
-    return h_y - np.log(1 / k), h_y
+    return h_y + np.log(k), h_y
 
 
 def kl_latent(q_mu, q_logs, q_rho, q_y, mu_lookup, logs_lookup, rho_lookup):
@@ -144,10 +144,16 @@ class KLpitch(BaseLoss):
 class MSEloss(BaseLoss):
     def __init__(self, weight=1, effect_epoch=1):
         super(MSEloss, self).__init__(weight, effect_epoch)
+        self.x_var = 1.
 
-    def __call__(self, epoch, x_predict, x):
+    def __call__(self, epoch, x_predict, x, is_train=True):
         if epoch >= self.effect_epoch:
-            return self.weight * mse_loss(x_predict, x)
+            r2 = F.mse_loss(x_predict, x, reduction='mean')
+            x_dim = np.prod(x_predict.shape[1:])
+
+            # ML estimation of likelihood
+            nll = 0.5 * x_dim * (np.log(2 * np.pi) + r2.log() + 1)
+            return self.weight * nll
         else:
             return torch.zeros(1)
 

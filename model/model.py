@@ -86,8 +86,8 @@ class CnnGMVAE(BaseGMVAE):
         init_logvar = np.log(init_sigma ** 2)
         nn.init.constant_(pitch_logs_lookup.weight, init_logvar)
         pitch_logs_lookup.weight.requires_grad = False
-        nn.init.constant_(pitch_rho_lookup.weight, -5)
-        pitch_rho_lookup.weight.requires_grad = False
+        nn.init.constant_(pitch_rho_lookup.weight, 0)
+        pitch_rho_lookup.weight.requires_grad = True
         # pitch_logvar_lookup.weight.requires_grad = True
 
         self.pitch_mu_lookup = pitch_mu_lookup

@@ -102,9 +102,9 @@ class BaseGMVAE(BaseModel):
         init_sigma = np.exp(pow_exp)
         init_logvar = np.log(init_sigma ** 2)
         nn.init.constant_(logs_lookup.weight, init_logvar)
-        nn.init.constant_(rho_lookup.weight, -5)
+        nn.init.constant_(rho_lookup.weight, 0)
         logs_lookup.weight.requires_grad = logvar_trainable
-        rho_lookup.weight.requires_grad = logvar_trainable
+        rho_lookup.weight.requires_grad = True
         self.logs_lookup = logs_lookup
         self.rho_lookup = rho_lookup
         # self.logvar_bound = np.log(np.exp(-1) ** 2)

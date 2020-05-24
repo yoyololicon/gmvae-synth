@@ -80,7 +80,7 @@ def rho_L_inv(logs, rho, z_dim):
 
 def rho_cov(logs, rho, z_dim):
     tmp = torch.arange(z_dim, dtype=logs.dtype, device=logs.device)
-    tmp = torch.cat((tmp, tmp.flip(0)[:-1]))
+    tmp = torch.cat((tmp.flip(0)[:-1], tmp))
     return logs.exp()[:, None, None] * (rho.unsqueeze(1) ** tmp).unfold(1, z_dim, 1).flip(-1)
 
 
@@ -94,3 +94,14 @@ def rho_precision(logs, rho, z_dim):
                         + torch.diag_embed(F.pad((1 + rho * rho).unsqueeze(1).expand(-1, z_dim - 2), (1, 1), value=1.))) \
                        * (torch.exp(-logs) / (1 - rho * rho))[:, None, None]
     return precision_matrix
+
+
+
+if __name__ == '__main__':
+    k = 5
+    logs = torch.Tensor([0])
+    rho = torch.Tensor([0.5])
+    L = rho_precision(logs, rho, k)
+    print(L)
+
+    print(rho_L_inv(logs, rho, k).transpose(1, 2) @ rho_L_inv(logs, rho, k))

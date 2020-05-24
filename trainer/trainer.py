@@ -44,7 +44,7 @@ class GMVAE_Trainer(BaseTrainer):
     def _compute_loss(self, epoch, x, x_predict, q_mu, q_logs, q_rho, log_q_y_logit, q_y, y,
                       is_train=True, label_idx=None,
                       pitch_input=None, pitch_mu=None, pitch_logs=None, pitch_rho=None, pitch_logit=None):
-        logpx_z = -1 * self.loss['loss_recon'](epoch, x_predict, x)
+        logpx_z = -1 * self.loss['loss_recon'](epoch, x_predict, x, is_train)
         kld_y, h_y = self.loss['loss_class'](epoch, log_q_y_logit, q_y, self.model.n_class)
         neg_kld_y = -1 * kld_y
         neg_kld_z = -1 * self.loss['loss_latent'](epoch, q_mu, q_logs, q_rho, q_y,
@@ -230,7 +230,7 @@ class GMVAE_Trainer(BaseTrainer):
                     self._compute_loss(epoch, data, x_predict, mu, logs, rho, log_q_y_logit, q_y, target,
                                        pitch_input=pitch_input, pitch_mu=pitch_mu,
                                        pitch_logs=pitch_logs, pitch_rho=pitch_rho, pitch_logit=pitch_logit,
-                                       is_train=True, label_idx=batch_label_idx)
+                                       is_train=False, label_idx=batch_label_idx)
 
                 total_val_loss += loss.item()
                 total_val_lowerbound += lower_bound.item()
