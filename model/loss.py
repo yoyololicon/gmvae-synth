@@ -148,12 +148,7 @@ class MSEloss(BaseLoss):
 
     def __call__(self, epoch, x_predict, x, is_train=True):
         if epoch >= self.effect_epoch:
-            r2 = F.mse_loss(x_predict, x, reduction='mean')
-            x_dim = np.prod(x_predict.shape[1:])
-
-            # ML estimation of likelihood
-            nll = 0.5 * x_dim * (np.log(2 * np.pi) + r2.log() + 1)
-            return self.weight * nll
+            return self.weight * mse_loss(x_predict, x)
         else:
             return torch.zeros(1)
 
